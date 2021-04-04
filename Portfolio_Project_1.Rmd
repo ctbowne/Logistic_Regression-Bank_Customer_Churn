@@ -1,0 +1,499 @@
+---
+title: "Project 1: Can we predict who is likely to leave the bank?"
+author: "Chris Bowne"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+It is cheaper to retain customers than aquire them. Just like any business, banks wish to limit customer exits (the churn) by predicting who is at risk.
+
+ 
+# Question
+Can we predict who is likely to leave the bank?
+
+# Data
+10,000 customer accounts defined by 11 variables. Split into training and testing.  Outcome variable is binary: true if customer leaves bank. The data set is free of empty fields.
+
+# Model 
+After backwards elimination and examination of interactions we arrived at a model as seen here.  Strongest predictors were whether or not a customer was "active" or not. The interaction between the number of products a customer had and whether they had a checking account or not also changed the odds of exit considerably. 
+
+![Logistic Model Diagram](\\model_diagram.png)
+
+# Prediction outcomes 
+Model correctly predicts a customer will leave 34% of the time. The overall correct prediction rate is 84%.  The model is not successful at predicting who will leave.
+
+
+```{r}
+
+library(car)
+library(caret)
+library(fastDummies)
+library(PerformanceAnalytics)
+library(rcompanion)
+library(readr)
+library(ROCR)
+library(tidyverse)
+library(sjPlot)
+library(visreg)
+
+bankdata <- read_csv("\\BankData.csv")
+```
+# Exploratory analysis
+
+Frequencies of categorical variable levels are sufficient
+
+```{r}
+counts <- with(bankdata,table(Geography))
+barplot(counts,main="Geography (Customer location)",ylab="frequency")
+
+counts <- with(bankdata,table(IsActiveMember))
+barplot(counts,main="Is Active Member",ylab="frequency",names.arg=c("No", "Yes"))
+
+counts <- with(bankdata,table(Gender))
+barplot(counts,main="Gender",ylab="frequency")
+
+counts <- with(bankdata,table(HasCrCard))
+barplot(counts,main="Has Credit Card",ylab="frequency",names.arg=c("No", "Yes"))
+
+counts <- with(bankdata,table(Exited))
+barplot(counts,main="Exited bank",ylab="frequency",names.arg=c("No", "Yes"))
+
+```
+Histograms of quantitative variables
+
+Age, Tenure, and Estimated Salary look fine.
+
+```{r}
+hist(bankdata$Age)
+hist(bankdata$Tenure) # uniform
+hist(bankdata$EstimatedSalary) #uniform
+```
+
+Balance histogram shows significant amount of zero balances, over a third.  Because the balance column represents checking account balance, we will treat a $0 balance as indicating the customer has some other product(s) from the bank than a checking account. It makes sense to act on this info by transforming Balance to a binary variable: balance/no balance
+
+
+```{r}
+hist(bankdata$Balance) # normal except a lot of 0 balances
+
+# Balance variable has many 0 balances, over a quarter of the data
+# the minimum non-zero balance is $3768.69
+summary(bankdata$Balance)
+banktemp <- arrange(bankdata,Balance) 
+bankfilter <- filter(banktemp, Balance > 0)
+head(select(bankfilter,Balance))
+
+# split Balance
+bankdata <-mutate(bankdata,Balance_cat=cut(bankdata$Balance,breaks=c(0,1,1000000),labels=c("zero","greater_than_zero"),                                  include.lowest=TRUE,ordered_result=TRUE))
+
+counts <- with(bankdata,table(Balance_cat))
+barplot(counts,main="Balance",ylab="frequency")
+```
+
+Number of Products has very low frequencies beyond two products. We will transform this variable to a binary variable: one product/more than one product
+
+```{r}
+hist(bankdata$NumOfProducts)
+# split Number Of Products
+bankdata <- mutate(bankdata,NumOfProducts_cat=cut(bankdata$NumOfProducts,breaks=c(1,1.9,10),labels=c("one","greater_than_one"),include.lowest=TRUE,ordered_result=TRUE))
+
+counts <- with(bankdata,table(NumOfProducts_cat))
+barplot(counts,main="Number of Products",ylab="frequency")
+
+```
+
+Credit Scores are easier to understand categorized according to risk assessments determined by credit agencies. It is more meaningful to think in terms of changes from one catagory to the next than numerical changes in credit score. Here we adopt the Experian credit score categories (Experian.com) and transform CreditScore to an ordinal variable of five levels.
+
+Credit score range	
+very poor 	 [300, 580)	
+fair 		     [580, 670)	
+good 		     [670, 740)	
+very good 	 [740, 800)	
+exceptional  [800, 850)	
+
+
+```{r}
+hist(bankdata$CreditScore)
+# split Credit score
+bankdata <- mutate(bankdata,CreditScore_cat=cut(bankdata$CreditScore,breaks=c(300,580,670,740,800,850),labels=c("very_poor","fair","good","very_good","exceptional"),                  include.lowest=TRUE,ordered_result=TRUE))
+
+counts <- with(bankdata,table(CreditScore_cat))
+barplot(counts,main="Credit Score",ylab="frequency")
+
+```
+
+In order to work with categorical variables we must create dummy columns. The base level for each categorical is determined alphabetically, with the exception of Credit Score, Balance, and Number of Products, which are determined ordinally (lowest becomes base).
+
+```{r}
+bankdata <- dummy_cols(bankdata, select_columns=c("CreditScore_cat","Balance_cat","Gender","Geography","NumOfProducts_cat"),remove_first_dummy = TRUE)
+```
+
+A check of multicollinearity between quantitative variables show no issues.
+```{r}
+# table of numerical variables only
+bankdata_num <- select(bankdata,Age,Tenure,EstimatedSalary)
+
+chart.Correlation(bankdata_num,
+                  method="pearson",
+                  histogram=TRUE,
+                  pch=16)
+```
+
+Check interactions with categorical variables using Cramer V coefficent w/ bias correction
+Interactions: Balance / Geography 
+              Balance / Number of Products
+
+```{r}
+
+tb1 <- with(bankdata, table(Balance_cat,CreditScore_cat))
+cramerV(tb1,bias.correct=TRUE)
+tb2 <- with(bankdata, table(Balance_cat,Gender))
+cramerV(tb2,bias.correct=TRUE)
+# correlation between Balance and Geography (Cramer V = 0.4354)
+tb3 <- with(bankdata, table(Balance_cat,Geography))
+cramerV(tb3,bias.correct=TRUE)
+tb4 <- with(bankdata, table(Balance_cat,HasCrCard))
+cramerV(tb4,bias.correct=TRUE)
+tb5 <- with(bankdata, table(Balance_cat,IsActiveMember))
+cramerV(tb5,bias.correct=TRUE)
+# correlation between Balance and Number of Products (Cramer V = 0.3887)
+tb6 <- with(bankdata, table(Balance_cat,NumOfProducts_cat))
+cramerV(tb6,bias.correct=TRUE)
+tb7 <- with(bankdata, table(CreditScore_cat,Gender))
+cramerV(tb7,bias.correct=TRUE)
+tb8 <- with(bankdata, table(CreditScore_cat,Geography))
+cramerV(tb8,bias.correct=TRUE)
+tb9 <- with(bankdata, table(CreditScore_cat,HasCrCard))
+cramerV(tb9,bias.correct=TRUE)
+tb10 <- with(bankdata, table(CreditScore_cat,IsActiveMember))
+cramerV(tb10,bias.correct=TRUE)
+tb11 <- with(bankdata, table(CreditScore_cat,NumOfProducts_cat))
+cramerV(tb11,bias.correct=TRUE)
+tb12 <- with(bankdata, table(Gender, Geography))
+cramerV(tb12,bias.correct=TRUE)
+tb13 <- with(bankdata, table(Gender,HasCrCard))
+cramerV(tb13,bias.correct=TRUE)
+tb14 <- with(bankdata, table(Gender,IsActiveMember))
+cramerV(tb14,bias.correct=TRUE)
+tb15 <- with(bankdata, table(Gender,NumOfProducts_cat))
+cramerV(tb15,bias.correct=TRUE)
+tb16 <- with(bankdata, table(Geography,HasCrCard))
+cramerV(tb16,bias.correct=TRUE)
+tb17 <- with(bankdata, table(Geography,IsActiveMember))
+cramerV(tb17,bias.correct=TRUE)
+tb18 <- with(bankdata, table(Geography,NumOfProducts_cat))
+cramerV(tb18,bias.correct=TRUE)
+tb19 <- with(bankdata, table(HasCrCard,IsActiveMember))
+cramerV(tb19,bias.correct=TRUE)
+tb20 <- with(bankdata, table(HasCrCard,NumOfProducts_cat))
+cramerV(tb20,bias.correct=TRUE)
+tb21 <- with(bankdata, table(IsActiveMember,NumOfProducts_cat))
+cramerV(tb21,bias.correct=TRUE)
+```
+
+Now we wish to check for correlations between continous and categorical variables. Use Logistic regression to check. Interactions
+Interactions: Age / Balance  *
+              Age / Gender   *
+              Age / Geography_Germany  ***
+              Age / Is Active Member   ***
+              Age / Number of Products ***
+              Tenure / Has Credit Card *
+
+```{r}
+# significant interaction (p < 0.01266)
+test <- with(bankdata, glm(Balance_cat_greater_than_zero ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Balance_cat_greater_than_zero ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Balance_cat_greater_than_zero ~ Tenure,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_fair ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_fair ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_fair ~ Tenure,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_good ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_good ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_good ~ Tenure,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_very_good ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_very_good ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_very_good ~ Tenure,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_exceptional ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_exceptional ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(CreditScore_cat_exceptional ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+# significant interaction (p < 0.04)
+test <- with(bankdata, glm(Gender_Male ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Gender_Male ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Gender_Male ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+# very significant interaction
+test <- with(bankdata, glm(Geography_Germany ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Geography_Germany ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Geography_Germany ~ Tenure,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Geography_Spain ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Geography_Spain ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(Geography_Spain ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+# almost significant interaction ( p < 0.0509)
+test <- with(bankdata, glm(HasCrCard ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(HasCrCard ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+
+# significant interaction (p < 0.021)
+test <- with(bankdata, glm(HasCrCard ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+# very significant interaction
+test <- with(bankdata, glm(IsActiveMember ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(IsActiveMember ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+
+# almost significant interaction (p < 0.0987)
+test <- with(bankdata, glm(IsActiveMember ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+# very significant interaction
+test <- with(bankdata, glm(NumOfProducts_cat_greater_than_one ~ Age,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(NumOfProducts_cat_greater_than_one ~ EstimatedSalary,
+                                   family="binomial"))
+summary(test)
+test <- with(bankdata, glm(NumOfProducts_cat_greater_than_one ~ Tenure,
+                                   family="binomial"))
+summary(test)
+
+```
+
+# Train Model
+
+Outcome variable of interest is binary. Logistic regression is used. Limited domain knowledge led to use of backwards elimination in model training. Since we will cross validate, we split data into train and test sets.
+We want to penalize model complexity so AIC minimization is sought.
+
+```{r}
+# Cross-validate by using 80% of data for training and 20% as new data
+set.seed(1)
+n <- dim(bankdata)[1]
+rows <- sample(1:n, 0.8 * n)
+bankdata_train <- bankdata[rows,]
+bankdata_test <- bankdata[-rows,]
+names(bankdata_train)
+mod1 <- glm(Exited ~ 
+              Age +
+              Balance_cat_greater_than_zero +
+              CreditScore_cat_fair +
+              CreditScore_cat_good + 
+              CreditScore_cat_very_good +
+              CreditScore_cat_exceptional +
+              EstimatedSalary +
+              Gender_Male +
+              Geography_Germany +
+              Geography_Spain +
+              HasCrCard +
+              IsActiveMember +
+              NumOfProducts_cat_greater_than_one +
+              Tenure +
+              Balance_cat_greater_than_zero*Geography_Germany*Geography_Spain*NumOfProducts_cat_greater_than_one*Gender_Male +
+              Age*Balance_cat_greater_than_zero + 
+              Age*Gender_Male +
+              Age*Geography_Germany +
+              Age*Geography_Spain +
+              Age*HasCrCard +
+              Age*IsActiveMember +
+              Age*NumOfProducts_cat_greater_than_one +
+              Tenure*IsActiveMember +
+              Tenure*HasCrCard,
+            family="binomial",data=bankdata_train)
+
+# AIC: 6270.9
+summary(mod1)
+
+mod2 <- glm(Exited ~
+              CreditScore_cat_good + 
+              EstimatedSalary +
+              Balance_cat_greater_than_zero*Geography_Germany*NumOfProducts_cat_greater_than_one*Gender_Male +
+              Age*IsActiveMember, 
+            family="binomial",data=bankdata_train)
+# AIC: 6250.5
+summary(mod2)
+
+
+mod3 <- glm(Exited ~
+              CreditScore_cat_good + 
+              EstimatedSalary +
+              Geography_Germany*NumOfProducts_cat_greater_than_one+
+              Balance_cat_greater_than_zero*NumOfProducts_cat_greater_than_one*Gender_Male+
+              Age*IsActiveMember,
+            family="binomial",data=bankdata_train)
+
+summary(mod3)
+# AIC 6248
+
+
+
+mod4 <- glm(Exited ~ 
+              CreditScore_cat_good + 
+              EstimatedSalary +
+              Geography_Germany*NumOfProducts_cat_greater_than_one +
+              Balance_cat_greater_than_zero*NumOfProducts_cat_greater_than_one +
+              NumOfProducts_cat_greater_than_one*Gender_Male +
+              Age*IsActiveMember,
+            family="binomial",data=bankdata_train)
+
+# AIC 6251
+summary(mod4)
+
+mod5 <- glm(Exited ~ 
+              CreditScore_cat_good + 
+              Gender_Male + 
+              Geography_Germany*NumOfProducts_cat_greater_than_one +
+              Balance_cat_greater_than_zero*NumOfProducts_cat_greater_than_one +
+              Age*IsActiveMember,
+            family="binomial",data=bankdata_train)
+
+# AIC: 6252.6
+summary(mod5)
+```
+
+# Model interaction plots
+Strong interaction between Balance category and Number of product category.  This is expected considering having a balance implies having at least one product.
+Strong interaction between Age numerical variable and category Is Active and whether customer exits
+Weak interaction between number of products and whether customer is in France or Spain and whether customer exits. AIC increases from 6252.6 to 6327.4 with removal of this last interaction term, so we will keep it in.
+
+```{r}
+# interaction plot
+i1 <- glm(Exited ~ Balance_cat_greater_than_zero * NumOfProducts_cat_greater_than_one, 
+          data = bankdata_train, family="binomial")
+visreg(i1, "Balance_cat_greater_than_zero", by = "NumOfProducts_cat_greater_than_one", 
+       overlay = TRUE, partial = FALSE, rug = FALSE, ylab="Exited")
+
+i2 <- glm(Exited ~ Age * IsActiveMember, 
+          data = bankdata_train, family="binomial")
+visreg(i2, "Age", by = "IsActiveMember", 
+       overlay = TRUE, partial = FALSE, rug = FALSE, ylab="Exited")
+
+# the change in the difference in log odds as the number of products goes from one to more than one is subtle 
+i3 <- glm(Exited ~ NumOfProducts_cat_greater_than_one * Geography_Germany, 
+          data = bankdata_train, family="binomial")
+visreg(i3, "NumOfProducts_cat_greater_than_one", by = "Geography_Germany", 
+       overlay = TRUE, partial = FALSE, rug = FALSE,ylab="Exited")
+
+mod5_1 <- glm(Exited ~ 
+              CreditScore_cat_good + 
+              Gender_Male + 
+              Geography_Germany +
+              Balance_cat_greater_than_zero*NumOfProducts_cat_greater_than_one +
+              Age*IsActiveMember,
+            family="binomial",data=bankdata_train)
+
+# AIC increases from 6252.6 to 6327.4 with removal of interaction term, so we will keep it.
+summary(mod5_1)
+
+```
+
+
+
+Goodness of Fit checked.  The model fails, but not by much. Additional cross validation is recommended.  Influence/leverage points checked, a couple high leverage low residual points. These are not an issue with our sample size.  
+
+```{r}
+# Pearson's Chi-square Goodness-of-fit test at a significance of 0.05
+# Null Hyp: Predictions fit the data
+# Outcome: null is rejected, but the magnitude of the difference is not much. 
+# To clarify, some additional cross validation could be tried. 
+print(paste("Pearson's X^2 =", round(sum(residuals(mod5,type="pearson")^2), 3))) # chi-squared
+qchisq(0.95,7989) # critical value
+pchisq(round(sum(residuals(mod5,type="pearson")^2), 3),7989, lower.tail = FALSE) # p-value
+
+# Logistic regression output is log odds of exiting bank, so exponentiate to odds of exit. 
+# This highlights influential variables in the model.
+# All variables are significant (CI does not cross 1)
+round(exp(cbind(Estimate=coef(mod5), confint(mod5))), 2) # confidence interval
+# Visually...
+plot_model(mod5)
+mmp(mod5) # mmp plot shows proportion of exits per log odds of exit and fit to training data. They are very similar.
+
+# We have a large enough sample that a few outliers are not significant
+# One outlier found
+outlierTest(mod5) 
+
+# The points with high residuals (beyond -2/2) have low leverage.
+influencePlot(mod5)
+
+```
+# Predictions
+
+The model has poor sensitivity to predicting what customers actually leave, but specificity is very good - very good in identifying who will NOT exit. But true exiters are mislabeled about 2/3 of the time. And this is the prediction we are most interested in!  Overall accuracy of model is over 80%
+
+```{r}
+
+result_mod5 <- predict(mod5, newdata=bankdata_test, type="response")
+pred_mod5 <- prediction(result_mod5, bankdata_test$Exited) # y, y-hat
+tab1 <- table(bankdata_test$Exited, result_mod5>0.5) # contingency table
+tab1 
+(sensitivity <- tab1[2,2]/(tab1[2,1]+tab1[2,2])) # sensitivity
+(specificity <- tab1[1,1]/(tab1[1,1]+tab1[1,2])) # specificity
+(accuracy <- (tab1[1,1]+tab1[2,2]) / (tab1[1,1] +tab1[1,2] + tab1[2,1] + tab1[2,2])) # accuracy
+# sensitivity = 0.3381 , specificity = 0.9677, accuracy = 0.8345
+# model is good at predicting people who don't exit, but not good at predicting people who do
+
+```
+
+# Conclusion
+
+The model performed poorly with worse than random type II errors.
